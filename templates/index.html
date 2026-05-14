@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>法律文书脱敏审查工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            background: #f0f2f5;
+            color: #333;
+            min-height: 100vh;
+        }
+
+        /* 顶部导航 */
+        .header {
+            background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
+            color: white;
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header h1::before {
+            content: "\1F512";
+            font-size: 24px;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn-settings {
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .btn-settings:hover {
+            background: rgba(255,255,255,0.25);
+        }
+
+        .ocr-badge {
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .ocr-badge.ready {
+            background: rgba(76, 175, 80, 0.3);
+            border-color: rgba(76, 175, 80, 0.6);
+        }
+
+        .ocr-badge.error {
+            background: rgba(244, 67, 54, 0.3);
+            border-color: rgba(244, 67, 54, 0.6);
+        }
+
+        /* 主体布局 */
+        .main-container {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 0;
+            height: calc(100vh - 60px);
+        }
+
+        /* 左侧面板 */
+        .sidebar {
+            background: white;
+            border-right: 1px solid #e8e8e8;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .category-list {
+            list-style: none;
+        }
+
+        .category-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .category-item:hover {
+            background: #f5f5f5;
+        }
+
+        .category-item input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            margin-right: 10px;
+            accent-color: #1a237e;
+        }
+
+        .category-item label {
+            font-size: 14px;
+            cursor: pointer;
+            flex: 1;
+        }
+
+        .category-item .count {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .select-all-btn {
+            display: block;
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 16px;
+            background: #e8eaf6;
+            border: none;
+            border-radius: 6px;
+            color: #1a237e;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .select-all-btn:hover {
+            background: #c5cae9;
+        }
+
+        /* 右侧工作区 */
+        .workspace {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* 工具栏 */
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 24px;
+            background: white;
+            border-bottom: 1px solid #e8e8e8;
+        }
+
+        .btn {
+            padding: 8px 18px;
+            border-radius: 6px;
+            border: none;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            background: #1a237e;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #283593;
+        }
+
+        .btn-primary:disabled {
+            background: #9e9e9e;
+            cursor: not-allowed;
+        }
+
+        .btn-success {
+            background: #2e7d32;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #388e3c;
+        }
+
+        .btn-warning {
+            background: #f57c00;
+            color: white;
+        }
+
+        .btn-warning:hover {
+            background: #ef6c00;
+        }
+
+        .btn-outline {
+            background: white;
+            color: #333;
+            border: 1px solid #d9d9d9;
+        }
+
+        .btn-outline:hover {
+            border-color: #1a237e;
+            color: #1a237e;
+        }
+
+        .toolbar-separator {
+            width: 1px;
+            height: 24px;
+            background: #e8e8e8;
+        }
+
+        .file-info {
+            margin-left: auto;
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* 内容区域 */
+        .content-area {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+            overflow: hidden;
+        }
+
+        .panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel:first-child {
+            border-right: 1px solid #e8e8e8;
+        }
+
+        .panel-header {
+            padding: 10px 20px;
+            background: #fafafa;
+            border-bottom: 1px solid #e8e8e8;
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .panel-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .text-content {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 14px;
+            line-height: 1.8;
+            font-family: "Microsoft YaHei", sans-serif;
+        }
+
+        /* 高亮敏感信息 */
+        .highlight {
+            background: #fff3e0;
+            border: 1px solid #ffb74d;
+            border-radius: 3px;
+            padding: 1px 4px;
+            cursor: pointer;
+            position: relative;
+            transition: background 0.2s;
+        }
+
+        .highlight:hover {
+            background: #ffe0b2;
+        }
+
+        .highlight.selected {
+            background: #ffcdd2;
+            border-color: #ef5350;
+        }
+
+        .highlight.masked {
+            background: #c8e6c9;
+            border-color: #66bb6a;
+            color: #2e7d32;
+        }
+
+        /* 上传区域 */
+        .upload-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 40px;
+        }
+
+        .upload-zone {
+            width: 100%;
+            max-width: 500px;
+            border: 2px dashed #c5cae9;
+            border-radius: 16px;
+            padding: 60px 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8f9ff;
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #1a237e;
+            background: #e8eaf6;
+        }
+
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .upload-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .upload-desc {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 20px;
+        }
+
+        .upload-formats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+        }
+
+        .format-tag {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .or-divider {
+            margin: 24px 0;
+            color: #999;
+            font-size: 14px;
+        }
+
+        .paste-btn {
+            padding: 12px 28px;
+            background: white;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .paste-btn:hover {
+            border-color: #1a237e;
+            color: #1a237e;
+        }
+
+        /* 检测结果列表 */
+        .results-panel {
+            background: white;
+            border-top: 1px solid #e8e8e8;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .result-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 20px;
+            border-bottom: 1px solid #f5f5f5;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+
+        .result-item:hover {
+            background: #f5f5f5;
+        }
+
+        .result-item input[type="checkbox"] {
+            margin-right: 10px;
+            accent-color: #1a237e;
+        }
+
+        .result-category {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-right: 10px;
+            white-space: nowrap;
+        }
+
+        .result-text {
+            flex: 1;
+            color: #d32f2f;
+            font-family: monospace;
+        }
+
+        .result-arrow {
+            color: #999;
+            margin: 0 8px;
+        }
+
+        .result-masked {
+            color: #2e7d32;
+            font-family: monospace;
+        }
+
+        /* 弹窗 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: white;
+            border-radius: 12px;
+            padding: 28px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        .modal h3 {
+            font-size: 18px;
+            margin-bottom: 16px;
+        }
+
+        .modal textarea {
+            width: 100%;
+            height: 200px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 14px;
+            resize: vertical;
+            font-family: "Microsoft YaHei", sans-serif;
+        }
+
+        .modal textarea:focus {
+            outline: none;
+            border-color: #1a237e;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 16px;
+        }
+
+        .modal input[type="text"] {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        .modal input[type="text"]:focus {
+            outline: none;
+            border-color: #1a237e;
+        }
+
+        /* 状态提示 */
+        .status-bar {
+            padding: 8px 24px;
+            background: #e8f5e9;
+            color: #2e7d32;
+            font-size: 13px;
+            border-top: 1px solid #c8e6c9;
+            display: none;
+        }
+
+        .status-bar.error {
+            background: #fce4ec;
+            color: #c62828;
+            border-top-color: #f8bbd0;
+        }
+
+        .status-bar.info {
+            background: #e3f2fd;
+            color: #1565c0;
+            border-top-color: #bbdefb;
+        }
+
+        .status-bar.visible {
+            display: block;
+        }
+
+        /* 加载动画 */
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .loading.visible {
+            display: block;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #e8eaf6;
+            border-top-color: #1a237e;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 导出下拉菜单 */
+        .dropdown {
+            position: relative;
+            display: inline-block;
+        }
+
+        .dropdown-content {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: white;
+            border: 1px solid #e8e8e8;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 100;
+            min-width: 150px;
+            padding: 4px;
+        }
+
+        .dropdown-content.show {
+            display: block;
+        }
+
+        .dropdown-item {
+            display: block;
+            width: 100%;
+            padding: 8px 14px;
+            border: none;
+            background: none;
+            text-align: left;
+            font-size: 13px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        .dropdown-item:hover {
+            background: #f5f5f5;
+        }
+
+        /* 统计信息 */
+        .stats {
+            display: flex;
+            gap: 20px;
+            padding: 12px 20px;
+            background: #fafafa;
+            border-bottom: 1px solid #e8e8e8;
+        }
+
+        .stat-item {
+            font-size: 13px;
+            color: #666;
+        }
+
+        .stat-item strong {
+            color: #1a237e;
+            font-size: 16px;
+        }
+
+        /* 响应式 */
+        @media (max-width: 1024px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                display: none;
+            }
+            .content-area {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- 顶部导航 -->
+    <div class="header">
+        <h1>法律文书脱敏审查工具</h1>
+        <div class="header-actions">
+            <span class="ocr-badge" id="ocrBadge" title="内置OCR引擎状态">OCR: 检测中...</span>
+        </div>
+    </div>
+
+    <!-- 主体 -->
+    <div class="main-container">
+        <!-- 左侧 - 脱敏类别 -->
+        <div class="sidebar">
+            <h3>脱敏类别</h3>
+            <button class="select-all-btn" id="selectAllBtn" onclick="toggleSelectAll()">全选 / 取消全选</button>
+            <ul class="category-list" id="categoryList">
+                <!-- 动态生成 -->
+            </ul>
+        </div>
+
+        <!-- 右侧 - 工作区 -->
+        <div class="workspace">
+            <!-- 工具栏 -->
+            <div class="toolbar" id="toolbar" style="display:none;">
+                <button class="btn btn-primary" onclick="detectSensitive()" id="btnDetect">
+                    <span>&#128269;</span> 检测敏感信息
+                </button>
+                <button class="btn btn-warning" onclick="executeMask()" id="btnMask" disabled>
+                    <span>&#128683;</span> 执行脱敏
+                </button>
+                <div class="toolbar-separator"></div>
+                <div class="dropdown">
+                    <button class="btn btn-success" onclick="toggleExportMenu()" id="btnExport" disabled>
+                        <span>&#128190;</span> 导出文件 &#9662;
+                    </button>
+                    <div class="dropdown-content" id="exportMenu">
+                        <button class="dropdown-item" onclick="exportFile('md')">导出为 Markdown</button>
+                        <button class="dropdown-item" onclick="exportFile('pdf')">导出为 PDF</button>
+                        <button class="dropdown-item" onclick="exportFile('docx')">导出为 Word</button>
+                    </div>
+                </div>
+                <button class="btn btn-outline" onclick="resetAll()">
+                    <span>&#128260;</span> 重新开始
+                </button>
+                <span class="file-info" id="fileInfo"></span>
+            </div>
+
+            <!-- 内容区 -->
+            <div class="content-area" id="contentArea">
+                <!-- 上传区域（初始状态） -->
+                <div class="upload-area" id="uploadArea" style="grid-column: 1/-1;">
+                    <div class="upload-zone" id="uploadZone">
+                        <div class="upload-icon">&#128196;</div>
+                        <div class="upload-title">拖拽文件到此处、点击选择，或 Ctrl+V 粘贴</div>
+                        <div class="upload-desc">支持 PDF、图片、Word、纯文本 等格式，也可粘贴截图</div>
+                        <div class="upload-formats">
+                            <span class="format-tag">PDF</span>
+                            <span class="format-tag">PNG/JPG</span>
+                            <span class="format-tag">DOCX</span>
+                            <span class="format-tag">TXT</span>
+                            <span class="format-tag">TIFF/BMP</span>
+                        </div>
+                    </div>
+                    <div class="or-divider">— 或者 —</div>
+                    <button class="paste-btn" onclick="openPasteModal()">&#128203; 直接粘贴文本内容</button>
+                    <input type="file" id="fileInput" hidden 
+                           accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.tif,.docx,.doc,.txt,.csv,.md">
+                </div>
+
+                <!-- 原文面板 -->
+                <div class="panel" id="originalPanel" style="display:none;">
+                    <div class="panel-header">
+                        <span>&#128196; 原文内容</span>
+                        <span id="originalStats"></span>
+                    </div>
+                    <div class="panel-body">
+                        <div class="text-content" id="originalText"></div>
+                    </div>
+                </div>
+
+                <!-- 结果面板 -->
+                <div class="panel" id="resultPanel" style="display:none;">
+                    <div class="panel-header">
+                        <span>&#128274; 脱敏结果</span>
+                        <span id="resultStats"></span>
+                    </div>
+                    <div class="panel-body">
+                        <div class="text-content" id="resultText"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 检测结果列表 -->
+            <div class="results-panel" id="resultsPanel" style="display:none;">
+                <div class="stats" id="statsBar">
+                    <div class="stat-item">检测到 <strong id="totalDetected">0</strong> 项</div>
+                    <div class="stat-item">已选择 <strong id="totalSelected">0</strong> 项</div>
+                    <button class="btn btn-outline" style="margin-left:auto; padding:4px 12px; font-size:12px;" onclick="selectAllResults()">全选结果</button>
+                    <button class="btn btn-outline" style="padding:4px 12px; font-size:12px;" onclick="deselectAllResults()">取消全选</button>
+                </div>
+                <div id="resultsList"></div>
+            </div>
+
+            <!-- 状态栏 -->
+            <div class="status-bar" id="statusBar"></div>
+
+            <!-- 加载状态 -->
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>正在处理文件，请稍候...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 粘贴文本弹窗 -->
+    <div class="modal-overlay" id="pasteModal">
+        <div class="modal">
+            <h3>&#128203; 粘贴文本内容</h3>
+            <textarea id="pasteTextarea" placeholder="请将需要脱敏的法律文书内容粘贴到此处..."></textarea>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closePasteModal()">取消</button>
+                <button class="btn btn-primary" onclick="submitPasteText()">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 状态管理
+        let state = {
+            originalText: '',
+            desensitizedText: '',
+            fileId: null,
+            originalName: '',
+            fileType: '',
+            detectedResults: [],
+            selectedCategories: [],
+            selectedResults: new Set()
+        };
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCategories();
+            setupUpload();
+            checkOCRStatus();
+        });
+
+        // 加载脱敏类别
+        async function loadCategories() {
+            try {
+                const resp = await fetch('/api/categories');
+                const data = await resp.json();
+                if (data.success) {
+                    renderCategories(data.categories);
+                }
+            } catch(e) {
+                console.error('加载类别失败:', e);
+            }
+        }
+
+        function renderCategories(categories) {
+            const list = document.getElementById('categoryList');
+            list.innerHTML = categories.map(cat => `
+                <li class="category-item">
+                    <input type="checkbox" id="cat_${cat.id}" value="${cat.id}" checked 
+                           onchange="updateSelectedCategories()">
+                    <label for="cat_${cat.id}">${cat.name}</label>
+                    <span class="count" id="count_${cat.id}" style="display:none">0</span>
+                </li>
+            `).join('');
+            updateSelectedCategories();
+        }
+
+        function updateSelectedCategories() {
+            const checkboxes = document.querySelectorAll('#categoryList input[type="checkbox"]');
+            state.selectedCategories = Array.from(checkboxes)
+                .filter(cb => cb.checked)
+                .map(cb => cb.value);
+        }
+
+        function toggleSelectAll() {
+            const checkboxes = document.querySelectorAll('#categoryList input[type="checkbox"]');
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            checkboxes.forEach(cb => cb.checked = !allChecked);
+            updateSelectedCategories();
+        }
+
+        // 文件上传
+        function setupUpload() {
+            const zone = document.getElementById('uploadZone');
+            const input = document.getElementById('fileInput');
+
+            zone.addEventListener('click', () => input.click());
+            
+            zone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                zone.classList.add('dragover');
+            });
+
+            zone.addEventListener('dragleave', () => {
+                zone.classList.remove('dragover');
+            });
+
+            zone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                zone.classList.remove('dragover');
+                if (e.dataTransfer.files.length > 0) {
+                    uploadFile(e.dataTransfer.files[0]);
+                }
+            });
+
+            input.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    uploadFile(e.target.files[0]);
+                }
+            });
+
+            // 支持 Ctrl+V 粘贴截图或图片
+            document.addEventListener('paste', (e) => {
+                // 如果正在编辑文本框则不拦截
+                if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+                
+                const items = e.clipboardData && e.clipboardData.items;
+                if (!items || items.length === 0) return;
+
+                let hasFile = false;
+                for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item.kind === 'file') {
+                        e.preventDefault();
+                        hasFile = true;
+                        const file = item.getAsFile();
+                        if (file) {
+                            // 给粘贴的图片一个带时间戳的文件名
+                            const now = new Date();
+                            const ts = now.getFullYear().toString() + 
+                                (now.getMonth()+1).toString().padStart(2,'0') +
+                                now.getDate().toString().padStart(2,'0') + '_' +
+                                now.getHours().toString().padStart(2,'0') +
+                                now.getMinutes().toString().padStart(2,'0') +
+                                now.getSeconds().toString().padStart(2,'0');
+                            const ext = (file.type.split('/')[1] || 'png').replace('jpeg','jpg');
+                            const namedFile = new File([file], `paste_${ts}.${ext}`, {type: file.type});
+                            uploadFile(namedFile);
+                        }
+                        return;
+                    }
+                }
+
+                // 如果剪贴板没有文件（例如从资源管理器复制的文件），给出提示
+                if (!hasFile) {
+                    // 检查是否有文本内容可以直接使用
+                    const text = e.clipboardData.getData('text/plain');
+                    if (text && text.trim().length > 10) {
+                        e.preventDefault();
+                        // 有文本内容，直接当作粘贴文本处理
+                        state.originalText = text;
+                        state.fileId = null;
+                        state.originalName = '粘贴文本';
+                        state.fileType = 'text';
+                        showWorkspace();
+                        autoDetectAndMask();
+                    } else {
+                        showStatus('提示：从资源管理器复制的文件无法直接粘贴，请使用拖拽或点击选择文件', 'error');
+                    }
+                }
+            });
+        }
+
+        async function uploadFile(file) {
+            showLoading(true);
+            
+            // 根据文件类型显示不同提示
+            const ext = file.name.split('.').pop().toLowerCase();
+            const isOCR = ['png','jpg','jpeg','bmp','tiff','tif','pdf'].includes(ext);
+            if (isOCR) {
+                showStatus('正在进行OCR识别，扫描件可能需要几秒钟，请稍候...', 'info');
+            } else {
+                showStatus('正在解析文件...', 'info');
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+
+                if (data.success) {
+                    state.originalText = data.text;
+                    state.fileId = data.file_id;
+                    state.originalName = data.original_name;
+                    state.fileType = data.file_type;
+                    showWorkspace();
+                    
+                    // 自动执行检测和脱敏
+                    await autoDetectAndMask();
+                } else {
+                    showStatus(data.error, 'error');
+                    showLoading(false);
+                }
+            } catch(e) {
+                showStatus('上传失败: ' + e.message, 'error');
+                showLoading(false);
+            }
+        }
+
+        // 上传后自动检测+脱敏
+        async function autoDetectAndMask() {
+            try {
+                showStatus('正在自动检测敏感信息...', 'info');
+
+                // 1. 检测
+                const resp = await fetch('/api/detect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: state.originalText,
+                        categories: state.selectedCategories.length > 0 ? state.selectedCategories : null
+                    })
+                });
+                const data = await resp.json();
+
+                if (!data.success) {
+                    showStatus(data.error, 'error');
+                    showLoading(false);
+                    return;
+                }
+
+                state.detectedResults = data.results;
+                state.selectedResults = new Set(data.results.map((_, i) => i));
+                renderDetectedResults();
+                highlightOriginalText();
+                updateCategoryCounts();
+                document.getElementById('btnMask').disabled = false;
+
+                if (data.total === 0) {
+                    showStatus('未检测到敏感信息', 'success');
+                    showLoading(false);
+                    return;
+                }
+
+                // 2. 自动执行脱敏
+                showStatus(`检测到 ${data.total} 项敏感信息，正在自动脱敏...`, 'info');
+
+                const resp2 = await fetch('/api/desensitize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: state.originalText,
+                        categories: state.selectedCategories.length > 0 ? state.selectedCategories : null,
+                        selected_items: Array.from(state.selectedResults)
+                    })
+                });
+                const data2 = await resp2.json();
+
+                if (data2.success) {
+                    state.desensitizedText = data2.desensitized_text;
+                    document.getElementById('resultText').textContent = state.desensitizedText;
+                    document.getElementById('resultStats').textContent = 
+                        `已脱敏 ${data2.total_masked} 项`;
+                    document.getElementById('btnExport').disabled = false;
+                    showStatus(`完成：检测到 ${data.total} 项敏感信息，已全部脱敏`, 'success');
+                } else {
+                    showStatus(data2.error, 'error');
+                }
+            } catch(e) {
+                showStatus('自动脱敏失败: ' + e.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // 显示工作区
+        function showWorkspace() {
+            document.getElementById('uploadArea').style.display = 'none';
+            document.getElementById('originalPanel').style.display = 'flex';
+            document.getElementById('resultPanel').style.display = 'flex';
+            document.getElementById('toolbar').style.display = 'flex';
+            document.getElementById('fileInfo').textContent = state.originalName;
+
+            // 显示原文
+            document.getElementById('originalText').textContent = state.originalText;
+            document.getElementById('originalStats').textContent = 
+                `${state.originalText.length} 字`;
+        }
+
+        // 检测敏感信息
+        async function detectSensitive() {
+            showLoading(true);
+            showStatus('正在检测敏感信息...', 'info');
+
+            try {
+                const resp = await fetch('/api/detect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: state.originalText,
+                        categories: state.selectedCategories.length > 0 ? state.selectedCategories : null
+                    })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    state.detectedResults = data.results;
+                    state.selectedResults = new Set(data.results.map((_, i) => i));
+                    renderDetectedResults();
+                    highlightOriginalText();
+                    updateCategoryCounts();
+                    document.getElementById('btnMask').disabled = false;
+                    showStatus(`检测完成，共发现 ${data.total} 项敏感信息`, 'success');
+                } else {
+                    showStatus(data.error, 'error');
+                }
+            } catch(e) {
+                showStatus('检测失败: ' + e.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // 渲染检测结果列表
+        function renderDetectedResults() {
+            const panel = document.getElementById('resultsPanel');
+            const list = document.getElementById('resultsList');
+            panel.style.display = 'block';
+
+            document.getElementById('totalDetected').textContent = state.detectedResults.length;
+            document.getElementById('totalSelected').textContent = state.selectedResults.size;
+
+            list.innerHTML = state.detectedResults.map((item, i) => `
+                <div class="result-item">
+                    <input type="checkbox" ${state.selectedResults.has(i) ? 'checked' : ''} 
+                           onchange="toggleResultItem(${i}, this.checked)">
+                    <span class="result-category">${item.category_name}</span>
+                    <span class="result-text">${escapeHtml(item.text)}</span>
+                    <span class="result-arrow">→</span>
+                    <span class="result-masked">${escapeHtml(item.masked)}</span>
+                </div>
+            `).join('');
+        }
+
+        function toggleResultItem(index, checked) {
+            if (checked) {
+                state.selectedResults.add(index);
+            } else {
+                state.selectedResults.delete(index);
+            }
+            document.getElementById('totalSelected').textContent = state.selectedResults.size;
+        }
+
+        function selectAllResults() {
+            state.selectedResults = new Set(state.detectedResults.map((_, i) => i));
+            renderDetectedResults();
+        }
+
+        function deselectAllResults() {
+            state.selectedResults.clear();
+            renderDetectedResults();
+        }
+
+        // 高亮原文中的敏感信息
+        function highlightOriginalText() {
+            let html = escapeHtml(state.originalText);
+            
+            // 从后向前替换，避免位置偏移
+            const sortedResults = [...state.detectedResults]
+                .map((item, i) => ({...item, index: i}))
+                .sort((a, b) => b.start - a.start);
+
+            // 由于 escapeHtml 可能改变长度，我们在纯文本上做标记
+            let markedText = state.originalText;
+            let markers = [];
+            
+            for (const item of sortedResults) {
+                markers.push({
+                    start: item.start,
+                    end: item.end,
+                    text: item.text,
+                    category: item.category_name,
+                    index: item.index
+                });
+            }
+
+            // 重新构建带高亮的HTML
+            let result = '';
+            let lastEnd = 0;
+            const forwardResults = [...markers].reverse();
+
+            for (const marker of forwardResults) {
+                result += escapeHtml(state.originalText.substring(lastEnd, marker.start));
+                result += `<span class="highlight" data-index="${marker.index}" title="${marker.category}">${escapeHtml(marker.text)}</span>`;
+                lastEnd = marker.end;
+            }
+            result += escapeHtml(state.originalText.substring(lastEnd));
+
+            document.getElementById('originalText').innerHTML = result;
+        }
+
+        // 更新类别计数
+        function updateCategoryCounts() {
+            const counts = {};
+            state.detectedResults.forEach(item => {
+                counts[item.category] = (counts[item.category] || 0) + 1;
+            });
+
+            Object.keys(counts).forEach(cat => {
+                const el = document.getElementById(`count_${cat}`);
+                if (el) {
+                    el.textContent = counts[cat];
+                    el.style.display = 'inline';
+                }
+            });
+        }
+
+        // 执行脱敏
+        async function executeMask() {
+            if (state.selectedResults.size === 0) {
+                showStatus('请至少选择一项需要脱敏的内容', 'error');
+                return;
+            }
+
+            showLoading(true);
+            showStatus('正在执行脱敏处理...', 'info');
+
+            try {
+                const resp = await fetch('/api/desensitize', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: state.originalText,
+                        categories: state.selectedCategories.length > 0 ? state.selectedCategories : null,
+                        selected_items: Array.from(state.selectedResults)
+                    })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    state.desensitizedText = data.desensitized_text;
+                    document.getElementById('resultText').textContent = state.desensitizedText;
+                    document.getElementById('resultStats').textContent = 
+                        `已脱敏 ${data.total_masked} 项`;
+                    document.getElementById('btnExport').disabled = false;
+                    showStatus(`脱敏完成，共处理 ${data.total_masked} 项敏感信息`, 'success');
+                } else {
+                    showStatus(data.error, 'error');
+                }
+            } catch(e) {
+                showStatus('脱敏失败: ' + e.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // 导出
+        function toggleExportMenu() {
+            const menu = document.getElementById('exportMenu');
+            menu.classList.toggle('show');
+        }
+
+        async function exportFile(format) {
+            document.getElementById('exportMenu').classList.remove('show');
+            
+            if (!state.desensitizedText) {
+                showStatus('请先执行脱敏操作', 'error');
+                return;
+            }
+
+            try {
+                const resp = await fetch('/api/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: state.desensitizedText,
+                        format: format,
+                        original_name: state.originalName,
+                        file_id: state.fileId,
+                        results: state.detectedResults
+                    })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    // 触发下载
+                    const a = document.createElement('a');
+                    a.href = data.download_url;
+                    a.download = data.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    showStatus(`文件已导出: ${data.filename}`, 'success');
+                } else {
+                    showStatus(data.error, 'error');
+                }
+            } catch(e) {
+                showStatus('导出失败: ' + e.message, 'error');
+            }
+        }
+
+        // 粘贴文本
+        function openPasteModal() {
+            document.getElementById('pasteModal').classList.add('active');
+            document.getElementById('pasteTextarea').focus();
+        }
+
+        function closePasteModal() {
+            document.getElementById('pasteModal').classList.remove('active');
+        }
+
+        function submitPasteText() {
+            const text = document.getElementById('pasteTextarea').value.trim();
+            if (!text) {
+                alert('请输入文本内容');
+                return;
+            }
+            state.originalText = text;
+            state.originalName = '粘贴文本';
+            state.fileType = 'text';
+            closePasteModal();
+            showWorkspace();
+            showStatus('文本已加载，可以开始检测', 'success');
+        }
+
+        // OCR状态检测
+        async function checkOCRStatus() {
+            const badge = document.getElementById('ocrBadge');
+            try {
+                const resp = await fetch('/api/ocr-status');
+                const data = await resp.json();
+                if (data.success) {
+                    badge.textContent = 'OCR: 内置就绪';
+                    badge.classList.add('ready');
+                } else {
+                    badge.textContent = 'OCR: 未安装';
+                    badge.classList.add('error');
+                }
+            } catch(e) {
+                badge.textContent = 'OCR: 检测失败';
+                badge.classList.add('error');
+            }
+        }
+
+        // 重置
+        function resetAll() {
+            state = {
+                originalText: '',
+                desensitizedText: '',
+                fileId: null,
+                originalName: '',
+                fileType: '',
+                detectedResults: [],
+                selectedCategories: state.selectedCategories,
+                selectedResults: new Set()
+            };
+
+            document.getElementById('uploadArea').style.display = 'flex';
+            document.getElementById('originalPanel').style.display = 'none';
+            document.getElementById('resultPanel').style.display = 'none';
+            document.getElementById('toolbar').style.display = 'none';
+            document.getElementById('resultsPanel').style.display = 'none';
+            document.getElementById('originalText').textContent = '';
+            document.getElementById('resultText').textContent = '';
+            document.getElementById('btnMask').disabled = true;
+            document.getElementById('btnExport').disabled = true;
+            hideStatus();
+
+            // 重置类别计数
+            document.querySelectorAll('.count').forEach(el => el.style.display = 'none');
+        }
+
+        // 工具函数
+        function showLoading(visible) {
+            document.getElementById('loading').classList.toggle('visible', visible);
+        }
+
+        function showStatus(message, type) {
+            const bar = document.getElementById('statusBar');
+            bar.textContent = message;
+            bar.className = `status-bar visible ${type}`;
+        }
+
+        function hideStatus() {
+            document.getElementById('statusBar').classList.remove('visible');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 点击外部关闭下拉菜单
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.dropdown')) {
+                document.getElementById('exportMenu').classList.remove('show');
+            }
+        });
+    </script>
+</body>
+</html>

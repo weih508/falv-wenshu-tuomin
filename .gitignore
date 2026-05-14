@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# IDE
+.vscode/
+.idea/
+
+# 运行时文件
+uploads/
+outputs/
+app.log
+*.log
+
+# 打包中间产物
+build/
+
+# 测试文件
+test_*.py
+test_*.txt
+导出效果预览.docx
