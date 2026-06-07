@@ -2,7 +2,7 @@
 """
 法律文书脱敏工具 - 文件处理模块
 支持格式：PDF、图片(PNG/JPG/BMP/TIFF)、Word(.docx)、文本(.txt)
-内置 RapidOCR 引擎（基于PaddleOCR ONNX模型），无需额外安装外部程序
+扫描PDF页优先使用 PaddleOCR；普通图片保留轻量 RapidOCR 路径。
 """
 
 import os
@@ -13,7 +13,6 @@ import re
 from typing import Tuple, Optional
 from pathlib import Path
 
-# 在导入onnxruntime之前设置多线程环境变量
 _cpu_count = os.cpu_count() or 4
 os.environ.setdefault('OMP_NUM_THREADS', str(min(_cpu_count, 8)))
 os.environ.setdefault('ORT_THREADS', str(min(_cpu_count, 8)))
@@ -37,6 +36,11 @@ except ImportError:
     RapidOCR = None
 
 try:
+    from paddleocr import PaddleOCR as PaddleOCRLib
+except ImportError:
+    PaddleOCRLib = None
+
+try:
     from docx import Document
 except ImportError:
     Document = None
@@ -51,6 +55,8 @@ OCR_MAX_SIDE = int(os.environ.get('OCR_MAX_SIDE', '2000'))
 OCR_MIN_SIDE = int(os.environ.get('OCR_MIN_SIDE', '1300'))
 PDF_OCR_SCALE = float(os.environ.get('PDF_OCR_SCALE', '2.0'))
 OCR_MIN_CONFIDENCE = float(os.environ.get('OCR_MIN_CONFIDENCE', '0.35'))
+PADDLE_OCR_LANG = os.environ.get('PADDLE_OCR_LANG', 'ch')
+PADDLE_OCR_USE_GPU = os.environ.get('PADDLE_OCR_USE_GPU', '0').lower() in ('1', 'true', 'yes')
 
 
 def get_resource_path(relative_path):
@@ -125,14 +131,106 @@ def _cleanup_ocr_text(text: str) -> str:
     return text.strip()
 
 
+def _format_fragments_as_text(fragments):
+    """把 OCR 框结果整理为文本，供 PaddleOCR/RapidOCR 共用。"""
+    if not fragments:
+        return ''
+
+    fragments.sort(key=lambda item: (item['cy'], item['x']))
+    median_height = _median([item['height'] for item in fragments]) or 18
+    y_threshold = max(10, median_height * 0.65)
+
+    rows = []
+    current = [fragments[0]]
+    current_y = fragments[0]['cy']
+
+    for item in fragments[1:]:
+        if abs(item['cy'] - current_y) <= y_threshold:
+            current.append(item)
+            current_y = sum(part['cy'] for part in current) / len(current)
+        else:
+            rows.append(current)
+            current = [item]
+            current_y = item['cy']
+    rows.append(current)
+
+    merged_lines = []
+    for row in rows:
+        avg_y = sum(item['cy'] for item in row) / len(row)
+        min_x = min(item['x'] for item in row)
+        avg_height = sum(item['height'] for item in row) / len(row)
+        text = _join_ocr_fragments(row)
+        if text:
+            merged_lines.append((avg_y, min_x, text, avg_height))
+
+    if not merged_lines:
+        return ''
+
+    base_x = min(line[1] for line in merged_lines)
+    output_lines = []
+    for i, (y, x, text, height) in enumerate(merged_lines):
+        indent = ''
+        if x - base_x > 24:
+            indent_chars = int((x - base_x) / 18)
+            indent = '  ' * min(indent_chars, 6)
+
+        if i > 0:
+            prev_y = merged_lines[i - 1][0]
+            prev_height = merged_lines[i - 1][3]
+            if y - prev_y > prev_height * 1.9:
+                output_lines.append('')
+
+        output_lines.append(indent + text)
+
+    return '\n'.join(output_lines)
+
+
+def _prepare_image_for_ocr(image_input):
+    """把图片整理成 OCR 友好的尺寸和对比度。"""
+    if Image is None:
+        raise ImportError("请安装 Pillow: pip install Pillow")
+
+    import numpy as np
+
+    if isinstance(image_input, str):
+        img = Image.open(image_input)
+        img = ImageOps.exif_transpose(img)
+    elif isinstance(image_input, np.ndarray):
+        img = Image.fromarray(image_input)
+    else:
+        return image_input
+
+    if img.mode in ('RGBA', 'LA'):
+        background = Image.new('RGB', img.size, 'white')
+        alpha = img.getchannel('A') if img.mode == 'RGBA' else img.getchannel(1)
+        background.paste(img.convert('RGB'), mask=alpha)
+        img = background
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    width, height = img.size
+    longest = max(width, height)
+    if longest > OCR_MAX_SIDE:
+        ratio = OCR_MAX_SIDE / longest
+        img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.LANCZOS)
+    elif longest < OCR_MIN_SIDE:
+        ratio = OCR_MIN_SIDE / longest
+        img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.BICUBIC)
+
+    gray = ImageOps.grayscale(img)
+    gray = ImageOps.autocontrast(gray)
+    gray = ImageEnhance.Contrast(gray).enhance(1.2)
+    gray = gray.filter(ImageFilter.SHARPEN)
+    return np.array(gray.convert('RGB'))
+
+
 class OCREngine:
-    """内置OCR引擎 - 基于RapidOCR(ONNX)，无需外部依赖"""
+    """普通图片用的轻量 OCR 引擎 - RapidOCR(ONNX)。"""
 
     _instance = None
 
     @classmethod
     def get_instance(cls):
-        """单例模式，避免重复加载模型"""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -196,52 +294,14 @@ class OCREngine:
         except Exception:
             pass
 
-    def _prepare_image(self, image_input):
-        """把图片整理成 OCR 友好的尺寸和对比度。"""
-        if Image is None:
-            raise ImportError("请安装 Pillow: pip install Pillow")
-
-        import numpy as np
-
-        if isinstance(image_input, str):
-            img = Image.open(image_input)
-            img = ImageOps.exif_transpose(img)
-        elif isinstance(image_input, np.ndarray):
-            img = Image.fromarray(image_input)
-        else:
-            return image_input
-
-        if img.mode in ('RGBA', 'LA'):
-            background = Image.new('RGB', img.size, 'white')
-            alpha = img.getchannel('A') if img.mode == 'RGBA' else img.getchannel(1)
-            background.paste(img.convert('RGB'), mask=alpha)
-            img = background
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
-
-        width, height = img.size
-        longest = max(width, height)
-        if longest > OCR_MAX_SIDE:
-            ratio = OCR_MAX_SIDE / longest
-            img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.LANCZOS)
-        elif longest < OCR_MIN_SIDE:
-            ratio = OCR_MIN_SIDE / longest
-            img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.BICUBIC)
-
-        gray = ImageOps.grayscale(img)
-        gray = ImageOps.autocontrast(gray)
-        gray = ImageEnhance.Contrast(gray).enhance(1.2)
-        gray = gray.filter(ImageFilter.SHARPEN)
-        return np.array(gray.convert('RGB'))
-
     def recognize(self, image_input) -> str:
-        """
-        识别图片中的文字，保留基本换行和缩进。
-        """
         self._init_ocr()
-        prepared_image = self._prepare_image(image_input)
-
+        prepared_image = _prepare_image_for_ocr(image_input)
         result, _ = self._ocr(prepared_image)
+        return self._format_rapidocr_result(result)
+
+    @staticmethod
+    def _format_rapidocr_result(result) -> str:
         if not result:
             return ''
 
@@ -260,62 +320,9 @@ class OCREngine:
                 continue
 
             metrics = _box_metrics(box)
-            fragments.append({
-                **metrics,
-                'text': text,
-                'confidence': conf_val,
-            })
+            fragments.append({**metrics, 'text': text, 'confidence': conf_val})
 
-        if not fragments:
-            return ''
-
-        fragments.sort(key=lambda item: (item['cy'], item['x']))
-        median_height = _median([item['height'] for item in fragments]) or 18
-        y_threshold = max(10, median_height * 0.65)
-
-        rows = []
-        current = [fragments[0]]
-        current_y = fragments[0]['cy']
-
-        for item in fragments[1:]:
-            if abs(item['cy'] - current_y) <= y_threshold:
-                current.append(item)
-                current_y = sum(part['cy'] for part in current) / len(current)
-            else:
-                rows.append(current)
-                current = [item]
-                current_y = item['cy']
-        rows.append(current)
-
-        merged_lines = []
-        for row in rows:
-            avg_y = sum(item['cy'] for item in row) / len(row)
-            min_x = min(item['x'] for item in row)
-            avg_height = sum(item['height'] for item in row) / len(row)
-            text = _join_ocr_fragments(row)
-            if text:
-                merged_lines.append((avg_y, min_x, text, avg_height))
-
-        if not merged_lines:
-            return ''
-
-        base_x = min(line[1] for line in merged_lines)
-        output_lines = []
-        for i, (y, x, text, height) in enumerate(merged_lines):
-            indent = ''
-            if x - base_x > 24:
-                indent_chars = int((x - base_x) / 18)
-                indent = '  ' * min(indent_chars, 6)
-
-            if i > 0:
-                prev_y = merged_lines[i - 1][0]
-                prev_height = merged_lines[i - 1][3]
-                if y - prev_y > prev_height * 1.9:
-                    output_lines.append('')
-
-            output_lines.append(indent + text)
-
-        return '\n'.join(output_lines)
+        return _format_fragments_as_text(fragments)
 
     def recognize_from_pil(self, pil_image) -> str:
         """从PIL Image对象识别文字"""
@@ -326,6 +333,96 @@ class OCREngine:
 
         img_array = np.array(pil_image)
         return self.recognize(img_array)
+
+
+class PaddleOCREngine:
+    """扫描PDF页专用 OCR 引擎 - PaddleOCR。"""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._ocr = None
+        self._init_lock = threading.Lock()
+
+    @property
+    def is_ready(self):
+        return self._ocr is not None
+
+    @staticmethod
+    def is_available():
+        return PaddleOCRLib is not None
+
+    def _init_ocr(self):
+        if self._ocr is not None:
+            return
+
+        with self._init_lock:
+            if self._ocr is not None:
+                return
+            if PaddleOCRLib is None:
+                raise ImportError(
+                    "扫描PDF页需要 PaddleOCR，请运行: pip install paddlepaddle paddleocr"
+                )
+
+            try:
+                self._ocr = PaddleOCRLib(
+                    use_angle_cls=True,
+                    lang=PADDLE_OCR_LANG,
+                    use_gpu=PADDLE_OCR_USE_GPU,
+                    show_log=False,
+                )
+            except TypeError:
+                self._ocr = PaddleOCRLib(use_angle_cls=True, lang=PADDLE_OCR_LANG)
+
+    def recognize(self, image_input) -> str:
+        self._init_ocr()
+        prepared_image = _prepare_image_for_ocr(image_input)
+        try:
+            result = self._ocr.ocr(prepared_image, cls=True)
+        except TypeError:
+            result = self._ocr.ocr(prepared_image)
+        return self._format_paddle_result(result)
+
+    @staticmethod
+    def _format_paddle_result(result) -> str:
+        lines = PaddleOCREngine._normalize_paddle_lines(result)
+        fragments = []
+
+        for line in lines:
+            if not isinstance(line, (list, tuple)) or len(line) < 2:
+                continue
+            box = line[0]
+            text_score = line[1]
+            if not isinstance(text_score, (list, tuple)) or not text_score:
+                continue
+
+            text = str(text_score[0]).strip()
+            try:
+                conf_val = float(text_score[1]) if len(text_score) > 1 else 1.0
+            except (TypeError, ValueError):
+                conf_val = 1.0
+
+            if conf_val < OCR_MIN_CONFIDENCE or not text:
+                continue
+
+            metrics = _box_metrics(box)
+            fragments.append({**metrics, 'text': text, 'confidence': conf_val})
+
+        return _format_fragments_as_text(fragments)
+
+    @staticmethod
+    def _normalize_paddle_lines(result):
+        if not result:
+            return []
+        if isinstance(result, list) and len(result) == 1 and isinstance(result[0], list):
+            return result[0] or []
+        return result if isinstance(result, list) else []
 
 
 class FileHandler:
@@ -339,15 +436,32 @@ class FileHandler:
     }
 
     def __init__(self):
-        """初始化文件处理器（OCR引擎内置，无需配置）"""
         self._ocr_engine = None
+        self._paddle_ocr_engine = None
 
     @property
     def ocr_engine(self):
-        """延迟加载OCR引擎"""
+        """普通图片OCR：RapidOCR。"""
         if self._ocr_engine is None:
             self._ocr_engine = OCREngine.get_instance()
         return self._ocr_engine
+
+    @property
+    def paddle_ocr_engine(self):
+        """扫描PDF页OCR：PaddleOCR。"""
+        if self._paddle_ocr_engine is None:
+            self._paddle_ocr_engine = PaddleOCREngine.get_instance()
+        return self._paddle_ocr_engine
+
+    def get_ocr_status(self):
+        paddle_engine = self.paddle_ocr_engine
+        rapid_engine = self.ocr_engine
+        return {
+            'paddle_available': paddle_engine.is_available(),
+            'paddle_ready': paddle_engine.is_ready,
+            'rapid_available': RapidOCR is not None,
+            'rapid_ready': rapid_engine.is_ready,
+        }
 
     @classmethod
     def get_file_type(cls, filename: str) -> Optional[str]:
@@ -364,9 +478,7 @@ class FileHandler:
         return cls.get_file_type(filename) is not None
 
     def extract_text(self, file_path: str) -> Tuple[str, str]:
-        """
-        从文件中提取文本
-        """
+        """从文件中提取文本"""
         file_type = self.get_file_type(file_path)
         if file_type is None:
             raise ValueError(f"不支持的文件格式: {Path(file_path).suffix}")
@@ -399,7 +511,7 @@ class FileHandler:
             os.unlink(tmp_path)
 
     def _extract_from_pdf(self, file_path: str) -> str:
-        """从PDF文件提取文本。原生文本页走快速路径，扫描页才进入OCR。"""
+        """从PDF文件提取文本。原生文本页走快速路径，扫描页走 PaddleOCR。"""
         if fitz is None:
             raise ImportError("请安装 PyMuPDF: pip install pymupdf")
 
@@ -434,7 +546,7 @@ class FileHandler:
             return len(stripped) < 10
 
     def _ocr_pdf_page(self, page, page_number: int) -> str:
-        """以较高倍率渲染扫描页，再交给 OCR。"""
+        """以较高倍率渲染扫描页，再交给 PaddleOCR。"""
         if fitz is None:
             raise ImportError("请安装 PyMuPDF: pip install pymupdf")
 
@@ -450,13 +562,15 @@ class FileHandler:
                 img_array = np.repeat(img_array, 3, axis=2)
             elif pix.n > 3:
                 img_array = img_array[:, :, :3]
-            return self.ocr_engine.recognize(img_array)
+            return self.paddle_ocr_engine.recognize(img_array)
+        except ImportError:
+            raise
         except Exception as exc:
-            print(f"[OCR] 第 {page_number} 页识别失败: {exc}")
+            print(f"[PaddleOCR] 第 {page_number} 页识别失败: {exc}")
             return ''
 
     def _extract_from_image(self, file_path: str) -> str:
-        """从图片文件提取文本（内置OCR）"""
+        """从图片文件提取文本（轻量RapidOCR）"""
         if Image is None:
             raise ImportError("请安装 Pillow: pip install Pillow")
 
