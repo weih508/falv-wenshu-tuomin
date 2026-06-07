@@ -7,15 +7,16 @@
 
 import os
 import sys
-import io
 import tempfile
+import threading
+import re
 from typing import Tuple, Optional
 from pathlib import Path
 
 # 在导入onnxruntime之前设置多线程环境变量
 _cpu_count = os.cpu_count() or 4
-os.environ.setdefault('OMP_NUM_THREADS', str(_cpu_count))
-os.environ.setdefault('ORT_THREADS', str(_cpu_count))
+os.environ.setdefault('OMP_NUM_THREADS', str(min(_cpu_count, 8)))
+os.environ.setdefault('ORT_THREADS', str(min(_cpu_count, 8)))
 
 try:
     import fitz  # PyMuPDF
@@ -23,9 +24,12 @@ except ImportError:
     fitz = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 except ImportError:
     Image = None
+    ImageOps = None
+    ImageFilter = None
+    ImageEnhance = None
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -43,11 +47,82 @@ except ImportError:
     chardet = None
 
 
+OCR_MAX_SIDE = int(os.environ.get('OCR_MAX_SIDE', '2000'))
+OCR_MIN_SIDE = int(os.environ.get('OCR_MIN_SIDE', '1300'))
+PDF_OCR_SCALE = float(os.environ.get('PDF_OCR_SCALE', '2.0'))
+OCR_MIN_CONFIDENCE = float(os.environ.get('OCR_MIN_CONFIDENCE', '0.35'))
+
+
 def get_resource_path(relative_path):
     """获取资源文件路径（兼容PyInstaller打包）"""
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', relative_path)
+
+
+def _median(values):
+    values = sorted(v for v in values if v > 0)
+    if not values:
+        return 0
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2
+
+
+def _box_metrics(box):
+    xs = [float(point[0]) for point in box]
+    ys = [float(point[1]) for point in box]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    return {
+        'x': x_min,
+        'y': y_min,
+        'cx': (x_min + x_max) / 2,
+        'cy': (y_min + y_max) / 2,
+        'width': max(x_max - x_min, 1),
+        'height': max(y_max - y_min, 1),
+    }
+
+
+def _looks_cjk_or_number(value):
+    return bool(re.search(r'[\u4e00-\u9fff0-9]', value or ''))
+
+
+def _join_ocr_fragments(fragments):
+    """按水平位置合并同一行，避免把身份证号/案号/地址用空格拆坏。"""
+    if not fragments:
+        return ''
+
+    fragments.sort(key=lambda item: item['x'])
+    merged = fragments[0]['text']
+    prev = fragments[0]
+
+    for item in fragments[1:]:
+        gap = item['x'] - (prev['x'] + prev['width'])
+        avg_char_width = max(prev['width'] / max(len(prev['text']), 1), 8)
+        prev_tail = merged[-1:] if merged else ''
+        next_head = item['text'][:1]
+
+        needs_space = gap > max(avg_char_width * 1.25, 10)
+        if _looks_cjk_or_number(prev_tail) or _looks_cjk_or_number(next_head):
+            needs_space = False
+        if prev_tail in '（([《“' or next_head in '，。；：、,.!?)]）”》':
+            needs_space = False
+
+        merged += (' ' if needs_space else '') + item['text']
+        prev = item
+
+    return _cleanup_ocr_text(merged)
+
+
+def _cleanup_ocr_text(text: str) -> str:
+    """清理 OCR 常见拼接噪声，提升后续敏感信息规则命中率。"""
+    text = re.sub(r'(?<=\d)\s+(?=\d)', '', text)
+    text = re.sub(r'(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])', '', text)
+    text = re.sub(r'\s+([，。；：、,.!?）)])', r'\1', text)
+    text = re.sub(r'([（(])\s+', r'\1', text)
+    return text.strip()
 
 
 class OCREngine:
@@ -64,25 +139,27 @@ class OCREngine:
 
     def __init__(self):
         self._ocr = None
+        self._init_lock = threading.Lock()
+
+    @property
+    def is_ready(self):
+        return self._ocr is not None
 
     def _init_ocr(self):
-        """延迟初始化OCR引擎（已优化速度）"""
-        if self._ocr is None:
+        """延迟初始化OCR引擎。首次识别才加载，避免应用启动时长时间卡住。"""
+        if self._ocr is not None:
+            return
+
+        with self._init_lock:
+            if self._ocr is not None:
+                return
             if RapidOCR is None:
                 raise ImportError(
                     "RapidOCR 未安装，请运行: pip install rapidocr-onnxruntime"
                 )
-            # 性能优化：
-            # 1. 关闭文字方向分类（法律文书不会倒置），节省约30%时间
-            # 2. 检测限制用max模式，避免小图被放大
-            # 3. 设置ONNX Runtime多线程加速
-            
-            # Monkey-patch OrtInferSession以启用多线程
+
             self._patch_ort_threading()
-            
-            self._ocr = RapidOCR(
-                use_angle_cls=False,        # 跳过方向分类模型，节省30%时间
-            )
+            self._ocr = RapidOCR(use_angle_cls=False)
 
     @staticmethod
     def _patch_ort_threading():
@@ -90,176 +167,163 @@ class OCREngine:
         try:
             from onnxruntime import SessionOptions, GraphOptimizationLevel, InferenceSession
             from rapidocr_onnxruntime.utils import OrtInferSession
-            
-            cpu_count = min(os.cpu_count() or 4, 8)  # 最多用8线程
-            _orig_init = OrtInferSession.__init__
-            
+
+            if getattr(OrtInferSession, '_legal_doc_fast_patch', False):
+                return
+
+            cpu_count = min(os.cpu_count() or 4, 8)
+
             def _fast_init(self, config):
                 sess_opt = SessionOptions()
                 sess_opt.log_severity_level = 4
                 sess_opt.enable_cpu_mem_arena = True
                 sess_opt.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
                 sess_opt.intra_op_num_threads = cpu_count
-                sess_opt.inter_op_num_threads = cpu_count
-                
+                sess_opt.inter_op_num_threads = max(1, cpu_count // 2)
+
                 cpu_ep = 'CPUExecutionProvider'
-                EP_list = [(cpu_ep, {'arena_extend_strategy': 'kSameAsRequested'})]
-                
+                ep_list = [(cpu_ep, {'arena_extend_strategy': 'kSameAsRequested'})]
+
                 self._verify_model(config['model_path'])
                 self.session = InferenceSession(
                     config['model_path'],
                     sess_options=sess_opt,
-                    providers=EP_list
+                    providers=ep_list
                 )
-            
-            OrtInferSession.__init__ = _fast_init
-        except Exception:
-            pass  # 如果patch失败，使用默认配置
 
-    def _resize_if_large(self, image_input):
-        """如果图片过大，缩小以加速OCR"""
+            OrtInferSession.__init__ = _fast_init
+            OrtInferSession._legal_doc_fast_patch = True
+        except Exception:
+            pass
+
+    def _prepare_image(self, image_input):
+        """把图片整理成 OCR 友好的尺寸和对比度。"""
+        if Image is None:
+            raise ImportError("请安装 Pillow: pip install Pillow")
+
         import numpy as np
-        
-        MAX_SIDE = 1200  # 最佳速度/精度平衡点
-        
+
         if isinstance(image_input, str):
-            # 文件路径，用PIL打开检查大小
             img = Image.open(image_input)
-            w, h = img.size
-            if max(w, h) > MAX_SIDE:
-                ratio = MAX_SIDE / max(w, h)
-                new_w, new_h = int(w * ratio), int(h * ratio)
-                img = img.resize((new_w, new_h), Image.LANCZOS)
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            return np.array(img)
+            img = ImageOps.exif_transpose(img)
         elif isinstance(image_input, np.ndarray):
-            h, w = image_input.shape[:2]
-            if max(w, h) > MAX_SIDE:
-                ratio = MAX_SIDE / max(w, h)
-                new_w, new_h = int(w * ratio), int(h * ratio)
-                img = Image.fromarray(image_input)
-                img = img.resize((new_w, new_h), Image.LANCZOS)
-                return np.array(img)
+            img = Image.fromarray(image_input)
+        else:
             return image_input
-        return image_input
+
+        if img.mode in ('RGBA', 'LA'):
+            background = Image.new('RGB', img.size, 'white')
+            alpha = img.getchannel('A') if img.mode == 'RGBA' else img.getchannel(1)
+            background.paste(img.convert('RGB'), mask=alpha)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        width, height = img.size
+        longest = max(width, height)
+        if longest > OCR_MAX_SIDE:
+            ratio = OCR_MAX_SIDE / longest
+            img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.LANCZOS)
+        elif longest < OCR_MIN_SIDE:
+            ratio = OCR_MIN_SIDE / longest
+            img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.BICUBIC)
+
+        gray = ImageOps.grayscale(img)
+        gray = ImageOps.autocontrast(gray)
+        gray = ImageEnhance.Contrast(gray).enhance(1.2)
+        gray = gray.filter(ImageFilter.SHARPEN)
+        return np.array(gray.convert('RGB'))
 
     def recognize(self, image_input) -> str:
         """
-        识别图片中的文字，保留原始排版格式
-        
-        Args:
-            image_input: 图片文件路径(str)或numpy数组
-            
-        Returns:
-            识别出的文本（保留段落间距和缩进）
+        识别图片中的文字，保留基本换行和缩进。
         """
         self._init_ocr()
-        
-        # 缩小大图以加速
-        image_input = self._resize_if_large(image_input)
-        
-        result, elapse = self._ocr(image_input)
-        
+        prepared_image = self._prepare_image(image_input)
+
+        result, _ = self._ocr(prepared_image)
         if not result:
             return ''
-        
-        # RapidOCR返回格式: [[box, text, confidence], ...]
-        lines = []
+
+        fragments = []
         for item in result:
-            if len(item) >= 3:
-                box = item[0]       # 文字框坐标 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-                text = item[1]      # 识别文本
-                confidence = item[2]  # 置信度
-                
-                # 确保置信度为数值类型
-                try:
-                    conf_val = float(confidence)
-                except (TypeError, ValueError):
-                    conf_val = 1.0
-                
-                if conf_val > 0.3 and text.strip():
-                    y_pos = float(box[0][1])
-                    x_pos = float(box[0][0])
-                    # 计算行高（用于判断段落间距）
-                    line_height = float(box[3][1]) - float(box[0][1])
-                    lines.append((y_pos, x_pos, text.strip(), line_height))
-        
-        if not lines:
+            if len(item) < 3:
+                continue
+            box, text, confidence = item[0], item[1], item[2]
+            try:
+                conf_val = float(confidence)
+            except (TypeError, ValueError):
+                conf_val = 1.0
+
+            text = (text or '').strip()
+            if conf_val < OCR_MIN_CONFIDENCE or not text:
+                continue
+
+            metrics = _box_metrics(box)
+            fragments.append({
+                **metrics,
+                'text': text,
+                'confidence': conf_val,
+            })
+
+        if not fragments:
             return ''
-        
-        # 按y坐标排序
-        lines.sort(key=lambda x: (x[0], x[1]))
-        
-        # 将相近y坐标的文本合并为一行
-        merged_lines = []  # [(y_pos, x_pos, text, line_height)]
-        current_line = [lines[0]]
-        y_threshold = 15  # y坐标差距小于15像素认为同一行
-        
-        for i in range(1, len(lines)):
-            if abs(lines[i][0] - current_line[-1][0]) < y_threshold:
-                current_line.append(lines[i])
+
+        fragments.sort(key=lambda item: (item['cy'], item['x']))
+        median_height = _median([item['height'] for item in fragments]) or 18
+        y_threshold = max(10, median_height * 0.65)
+
+        rows = []
+        current = [fragments[0]]
+        current_y = fragments[0]['cy']
+
+        for item in fragments[1:]:
+            if abs(item['cy'] - current_y) <= y_threshold:
+                current.append(item)
+                current_y = sum(part['cy'] for part in current) / len(current)
             else:
-                current_line.sort(key=lambda x: x[1])
-                avg_y = sum(item[0] for item in current_line) / len(current_line)
-                min_x = min(item[1] for item in current_line)
-                avg_height = sum(item[3] for item in current_line) / len(current_line)
-                merged_text = ' '.join(item[2] for item in current_line)
-                merged_lines.append((avg_y, min_x, merged_text, avg_height))
-                current_line = [lines[i]]
-        
-        # 处理最后一行
-        current_line.sort(key=lambda x: x[1])
-        avg_y = sum(item[0] for item in current_line) / len(current_line)
-        min_x = min(item[1] for item in current_line)
-        avg_height = sum(item[3] for item in current_line) / len(current_line)
-        merged_text = ' '.join(item[2] for item in current_line)
-        merged_lines.append((avg_y, min_x, merged_text, avg_height))
-        
+                rows.append(current)
+                current = [item]
+                current_y = item['cy']
+        rows.append(current)
+
+        merged_lines = []
+        for row in rows:
+            avg_y = sum(item['cy'] for item in row) / len(row)
+            min_x = min(item['x'] for item in row)
+            avg_height = sum(item['height'] for item in row) / len(row)
+            text = _join_ocr_fragments(row)
+            if text:
+                merged_lines.append((avg_y, min_x, text, avg_height))
+
         if not merged_lines:
             return ''
-        
-        # 根据行间距还原段落格式
-        # 计算基准左边距（大部分行的x起始位置）
-        x_positions = [line[1] for line in merged_lines]
-        base_x = min(x_positions) if x_positions else 0
-        
+
+        base_x = min(line[1] for line in merged_lines)
         output_lines = []
         for i, (y, x, text, height) in enumerate(merged_lines):
-            # 计算缩进（相对于基准左边距的空格数）
             indent = ''
-            if x - base_x > 20:  # 超过20像素认为有缩进
-                indent_chars = int((x - base_x) / 12)  # 大约12像素一个字符宽
-                indent = '  ' * min(indent_chars, 8)  # 最多8级缩进
-            
-            # 判断是否需要额外空行（段落间距）
+            if x - base_x > 24:
+                indent_chars = int((x - base_x) / 18)
+                indent = '  ' * min(indent_chars, 6)
+
             if i > 0:
-                prev_y = merged_lines[i-1][0]
-                prev_height = merged_lines[i-1][3]
-                gap = y - prev_y
-                # 如果行间距大于1.8倍行高，认为是段落分隔
-                if gap > prev_height * 1.8:
-                    output_lines.append('')  # 插入空行表示段落分隔
-            
+                prev_y = merged_lines[i - 1][0]
+                prev_height = merged_lines[i - 1][3]
+                if y - prev_y > prev_height * 1.9:
+                    output_lines.append('')
+
             output_lines.append(indent + text)
-        
+
         return '\n'.join(output_lines)
 
     def recognize_from_pil(self, pil_image) -> str:
-        """
-        从PIL Image对象识别文字
-        
-        Args:
-            pil_image: PIL Image对象
-            
-        Returns:
-            识别出的文本
-        """
+        """从PIL Image对象识别文字"""
         import numpy as np
-        
+
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
-        
+
         img_array = np.array(pil_image)
         return self.recognize(img_array)
 
@@ -302,12 +366,6 @@ class FileHandler:
     def extract_text(self, file_path: str) -> Tuple[str, str]:
         """
         从文件中提取文本
-        
-        Args:
-            file_path: 文件路径
-            
-        Returns:
-            (提取的文本, 文件类型)
         """
         file_type = self.get_file_type(file_path)
         if file_type is None:
@@ -315,19 +373,16 @@ class FileHandler:
 
         if file_type == 'pdf':
             return self._extract_from_pdf(file_path), 'pdf'
-        elif file_type == 'image':
+        if file_type == 'image':
             return self._extract_from_image(file_path), 'image'
-        elif file_type == 'word':
+        if file_type == 'word':
             return self._extract_from_word(file_path), 'word'
-        elif file_type == 'text':
+        if file_type == 'text':
             return self._extract_from_text(file_path), 'text'
-        else:
-            raise ValueError(f"不支持的文件类型: {file_type}")
+        raise ValueError(f"不支持的文件类型: {file_type}")
 
     def extract_text_from_bytes(self, file_bytes: bytes, filename: str) -> Tuple[str, str]:
-        """
-        从文件字节流中提取文本
-        """
+        """从文件字节流中提取文本"""
         file_type = self.get_file_type(filename)
         if file_type is None:
             raise ValueError(f"不支持的文件格式: {Path(filename).suffix}")
@@ -344,41 +399,61 @@ class FileHandler:
             os.unlink(tmp_path)
 
     def _extract_from_pdf(self, file_path: str) -> str:
-        """从PDF文件提取文本"""
+        """从PDF文件提取文本。原生文本页走快速路径，扫描页才进入OCR。"""
         if fitz is None:
             raise ImportError("请安装 PyMuPDF: pip install pymupdf")
 
         text_parts = []
         doc = fitz.open(file_path)
 
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            page_text = page.get_text("text")
+        try:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                page_text = page.get_text("text") or ''
 
-            # 如果页面文本为空或极少，尝试OCR识别（可能是扫描件）
-            if not page_text.strip() or len(page_text.strip()) < 10:
-                try:
-                    import numpy as np
-                    # 直接渲染为适合OCR的大小，无需过大
-                    mat = fitz.Matrix(1.2, 1.2)
-                    pix = page.get_pixmap(matrix=mat)
-                    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                        pix.height, pix.width, pix.n
-                    )
-                    # 如果有alpha通道，转为RGB
-                    if pix.n == 4:
-                        img_array = img_array[:, :, :3]
-                    ocr_text = self.ocr_engine.recognize(img_array)
+                if self._page_needs_ocr(page, page_text):
+                    ocr_text = self._ocr_pdf_page(page, page_num + 1)
                     if ocr_text.strip():
                         page_text = ocr_text
-                except Exception:
-                    pass
 
-            if page_text.strip():
-                text_parts.append(f"--- 第 {page_num + 1} 页 ---\n{page_text}")
+                if page_text.strip():
+                    text_parts.append(f"--- 第 {page_num + 1} 页 ---\n{page_text.strip()}")
+        finally:
+            doc.close()
 
-        doc.close()
         return '\n\n'.join(text_parts)
+
+    @staticmethod
+    def _page_needs_ocr(page, page_text: str) -> bool:
+        stripped = (page_text or '').strip()
+        if len(stripped) >= 20:
+            return False
+        try:
+            return bool(page.get_images(full=True)) or len(stripped) < 10
+        except Exception:
+            return len(stripped) < 10
+
+    def _ocr_pdf_page(self, page, page_number: int) -> str:
+        """以较高倍率渲染扫描页，再交给 OCR。"""
+        if fitz is None:
+            raise ImportError("请安装 PyMuPDF: pip install pymupdf")
+
+        import numpy as np
+
+        try:
+            matrix = fitz.Matrix(PDF_OCR_SCALE, PDF_OCR_SCALE)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, pix.n
+            )
+            if pix.n == 1:
+                img_array = np.repeat(img_array, 3, axis=2)
+            elif pix.n > 3:
+                img_array = img_array[:, :, :3]
+            return self.ocr_engine.recognize(img_array)
+        except Exception as exc:
+            print(f"[OCR] 第 {page_number} 页识别失败: {exc}")
+            return ''
 
     def _extract_from_image(self, file_path: str) -> str:
         """从图片文件提取文本（内置OCR）"""
@@ -395,11 +470,9 @@ class FileHandler:
         doc = Document(file_path)
         text_parts = []
 
-        # 保留所有段落，包括空行（段落间距）
         for para in doc.paragraphs:
             text_parts.append(para.text)
 
-        # 表格内容追加在后面
         for table in doc.tables:
             for row in table.rows:
                 row_text = ' | '.join(cell.text.strip() for cell in row.cells if cell.text.strip())
@@ -436,37 +509,37 @@ class PDFRedactor:
 
         doc = fitz.open()
         pages = redacted_text.split('--- 第')
-        
+
         for page_content in pages:
             if not page_content.strip():
                 continue
-            
+
             lines = page_content.split('\n')
             if lines and '页 ---' in lines[0]:
                 lines = lines[1:]
-            
+
             content = '\n'.join(lines).strip()
             if not content:
                 continue
-            
+
             page = doc.new_page(width=595, height=842)
             text_writer = fitz.TextWriter(page.rect)
             font = fitz.Font("china-s")
-            
+
             y_pos = 50
             for line in content.split('\n'):
                 if y_pos > 790:
                     page = doc.new_page(width=595, height=842)
                     text_writer = fitz.TextWriter(page.rect)
                     y_pos = 50
-                
+
                 try:
                     text_writer.append((50, y_pos), line, font=font, fontsize=11)
                 except Exception:
                     text_writer.append((50, y_pos), line.encode('ascii', 'replace').decode(), fontsize=11)
                 y_pos += 18
-            
+
             text_writer.write_text(page)
-        
+
         doc.save(output_path)
         doc.close()
